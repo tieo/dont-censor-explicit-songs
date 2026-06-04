@@ -1,0 +1,40 @@
+{
+  "name": "dont-censor-explicit-songs",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "wxt build && node scripts/dev.mjs",
+    "dev:wxt": "wxt",
+    "dev:firefox": "wxt -b firefox",
+    "build": "wxt build",
+    "build:firefox": "wxt build -b firefox",
+    "zip": "wxt zip",
+    "zip:firefox": "wxt zip -b firefox",
+    "postinstall": "wxt prepare",
+    "test:smoke": "tsx tests/smoke.ts",
+    "test:e2e": "tsx tests/e2e.mjs",
+    "test:e2e:full": "node scripts/test-e2e.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "11.5.1",
+      "onFail": "download"
+    }
+  },
+  "type": "module",
+  "devDependencies": {
+    "@types/chrome": "^0.1.42",
+    "@types/node": "^25.9.1",
+    "playwright": "^1.60.0",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "wxt": "^0.20.26"
+  }
+}

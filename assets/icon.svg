@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!--
+    Riff on YouTube Music's own inline explicit badge: a black rounded square
+    containing a bold white "E". The extension's job is to make sure that
+    badge applies to whatever's playing, so it's the visual contract with
+    the user.
+  -->
+  <rect x="4" y="4" width="120" height="120" rx="26" ry="26" fill="#0F0F0F"/>
+  <text x="64" y="94"
+        font-family="Inter, 'Helvetica Neue', Arial, sans-serif"
+        font-weight="900"
+        font-size="92"
+        text-anchor="middle"
+        fill="#FFFFFF"
+        letter-spacing="-2">E</text>
+</svg>

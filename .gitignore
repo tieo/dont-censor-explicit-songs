@@ -1,0 +1,6 @@
+node_modules/
+.wxt/
+.output/
+.wxt-profile/
+.env
+.env.local
