@@ -20,11 +20,43 @@ export const DEFAULT_CONTEXT: InnertubeContext = {
   },
 };
 
-// Publicly known key embedded in the music.youtube.com web client.
-const WEB_REMIX_KEY = 'AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30';
-
 // Search filter param that scopes results to Songs only.
 const SONGS_FILTER = 'EgWKAQIIAWoMEA4QChADEAQQCRAF';
+
+/**
+ * Resolve the Innertube API key. The key is not a secret — it's the same
+ * value the music.youtube.com web client ships in its bootstrap config, used
+ * to identify "we're the YT Music web client" — but we read it from the
+ * page (or scrape it from the page's HTML in Node) instead of hardcoding so
+ * GitHub's secret scanner doesn't flag the literal as a leaked Google key.
+ */
+let cachedKey: string | undefined;
+async function getInnertubeKey(fetchImpl: typeof fetch, headers: Record<string, string>): Promise<string> {
+  if (cachedKey) return cachedKey;
+
+  // In the browser / extension MAIN-world context the SPA already loaded the
+  // config under window.ytcfg. Read it directly.
+  if (typeof window !== 'undefined') {
+    const cfg = (window as { ytcfg?: { get?: (k: string) => unknown; data_?: Record<string, unknown> } }).ytcfg;
+    const fromGetter = cfg?.get?.('INNERTUBE_API_KEY');
+    const fromData = cfg?.data_?.INNERTUBE_API_KEY;
+    const key = typeof fromGetter === 'string' ? fromGetter : typeof fromData === 'string' ? fromData : undefined;
+    if (key) {
+      cachedKey = key;
+      return key;
+    }
+  }
+
+  // Node / first-load fallback: fetch the music.youtube.com landing page and
+  // pull the key out of its inline ytcfg.set(...) blob.
+  const res = await fetchImpl('https://music.youtube.com/', { headers });
+  if (!res.ok) throw new Error(`could not fetch music.youtube.com for key: ${res.status}`);
+  const html = await res.text();
+  const m = html.match(/"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"/);
+  if (!m) throw new Error('could not extract INNERTUBE_API_KEY from music.youtube.com');
+  cachedKey = m[1];
+  return cachedKey;
+}
 
 export interface SearchOptions {
   context?: InnertubeContext;
@@ -39,6 +71,13 @@ export interface SearchOptions {
    * forbidden in browser fetch (the browser sends real cookies automatically).
    */
   includeConsentCookie?: boolean;
+  /**
+   * Hard per-call timeout in milliseconds (default 5000). Beyond this we
+   * abort the fetch so a single throttled / hung request can't stall callers
+   * (notably the /next post-processor in the content script, which races
+   * many concurrent searches).
+   */
+  timeoutMs?: number;
 }
 
 export async function search(query: string, opts: SearchOptions = {}): Promise<unknown> {
@@ -64,13 +103,22 @@ export async function search(query: string, opts: SearchOptions = {}): Promise<u
     }
   }
 
-  const url = `https://music.youtube.com/youtubei/v1/search?prettyPrint=false&key=${WEB_REMIX_KEY}`;
-  const res = await fetchImpl(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-    credentials: inBrowser ? 'include' : undefined,
-  });
+  const key = await getInnertubeKey(fetchImpl, headers);
+  const url = `https://music.youtube.com/youtubei/v1/search?prettyPrint=false&key=${key}`;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), opts.timeoutMs ?? 5000);
+  let res: Response;
+  try {
+    res = await fetchImpl(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      credentials: inBrowser ? 'include' : undefined,
+      signal: ac.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!res.ok) {
     throw new Error(`YT Music search failed: ${res.status} ${res.statusText}`);

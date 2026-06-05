@@ -93,7 +93,10 @@ export default defineContentScript({
       }
       const p = (async () => {
         try {
-          const json = await search(`${meta.title} ${meta.artist}`, { fetchImpl: ORIG_FETCH });
+          const json = await search(`${meta.title} ${meta.artist}`, {
+            fetchImpl: ORIG_FETCH,
+            timeoutMs: 4000,
+          });
           const rows: TrackRow[] = parseSearchResponse(json);
           const selfRow = rows.find((r) => r.videoId === meta.videoId);
           if (selfRow?.explicit) {
@@ -180,10 +183,23 @@ export default defineContentScript({
         const metas = extractQueueMetas(json);
 
         if (metas.length) {
-          log(`/next: resolving swaps for ${metas.length} queue meta(s)...`);
-          // Block until all swaps are decided. This makes /next slow on the
-          // first call but the answer is then cached for /player.
-          await Promise.all(metas.map((m) => resolveExplicit(m).catch(() => null)));
+          // Block /next on the first few items (covers what the user sees in
+          // the upcoming-queue panel above the fold) and pre-warm a small
+          // additional batch in the background. We deliberately do NOT fan
+          // out to all 50 queue items — a swarm of concurrent searches both
+          // saturates the browser's network pool (delaying the queue render
+          // the SPA needs to draw) and trips Google's per-IP rate limit so
+          // the few that matter get throttled. The cache-miss /player path
+          // covers any item we didn't pre-resolve.
+          const BLOCKING = 2;
+          const BACKGROUND = 6;
+          log(
+            `/next: resolving ${Math.min(metas.length, BLOCKING)} blocking + ${Math.min(Math.max(metas.length - BLOCKING, 0), BACKGROUND)} background of ${metas.length} queue meta(s)...`,
+          );
+          const blocking = metas.slice(0, BLOCKING);
+          const background = metas.slice(BLOCKING, BLOCKING + BACKGROUND);
+          await Promise.all(blocking.map((m) => resolveExplicit(m).catch(() => null)));
+          for (const m of background) void resolveExplicit(m).catch(() => null);
         }
 
         const { mutated } = injectExplicitBadges(json);
@@ -268,18 +284,45 @@ export default defineContentScript({
       }
 
       // Slow path: cache miss. Defer the send while we resolve via a minimal
-      // /player ping (gives us title/artist) → search → decide.
+      // /player ping (gives us title/artist) → search → decide. Bounded with
+      // a hard wall-clock budget: if anything in this path stalls (Google
+      // rate-limit, network blip), we MUST still call ORIG_XHR_SEND on the
+      // original body — otherwise the SPA's XHR is dead and the player just
+      // shows a spinner forever (and our e2e observer never sees a response).
       log(`/player cache miss for ${videoId}, deferring to resolve...`);
+      const SLOW_PATH_BUDGET_MS = 7000;
+      let xhrSent = false;
+      const sendOrig = () => {
+        if (xhrSent) return;
+        xhrSent = true;
+        ORIG_XHR_SEND.call(this, body);
+      };
+      const sendSwapped = (swap: string) => {
+        if (xhrSent) return;
+        xhrSent = true;
+        parsed.videoId = swap;
+        ORIG_XHR_SEND.call(this, JSON.stringify(parsed));
+      };
+      const budgetTimer = setTimeout(() => {
+        if (!xhrSent) log(`/player slow-path budget exceeded for ${videoId}, sending original`);
+        sendOrig();
+      }, SLOW_PATH_BUDGET_MS);
       void (async () => {
         try {
-          // Hit /player with the original body to fetch metadata cheaply via
-          // ORIG_FETCH (own session). We only need videoDetails.
-          const probe = await ORIG_FETCH(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body,
-            credentials: 'include',
-          });
+          const probeAc = new AbortController();
+          const probeTimer = setTimeout(() => probeAc.abort(), 4000);
+          let probe: Response;
+          try {
+            probe = await ORIG_FETCH(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body,
+              credentials: 'include',
+              signal: probeAc.signal,
+            });
+          } finally {
+            clearTimeout(probeTimer);
+          }
           const probeJson = await probe.json();
           const vd = probeJson?.videoDetails;
           if (vd?.title && vd?.author) {
@@ -292,18 +335,17 @@ export default defineContentScript({
             };
             const swap = await resolveExplicit(meta);
             if (swap && swap !== videoId) {
-              parsed.videoId = swap;
-              const newBody = JSON.stringify(parsed);
               log(`/player swap (resolved): ${videoId} → ${swap}`);
-              ORIG_XHR_SEND.call(this, newBody);
+              clearTimeout(budgetTimer);
+              sendSwapped(swap);
               return;
             }
           }
         } catch (err) {
           log('cache-miss resolution failed', err);
         }
-        // Fallback: send original.
-        ORIG_XHR_SEND.call(this, body);
+        clearTimeout(budgetTimer);
+        sendOrig();
       })();
     } as typeof XMLHttpRequest.prototype.send;
   },

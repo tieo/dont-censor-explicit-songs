@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [chrome, firefox]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build
+        run: |
+          if [ "${{ matrix.target }}" = "firefox" ]; then
+            pnpm build:firefox
+          else
+            pnpm build
+          fi
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-${{ matrix.target }}
+          path: .output/${{ matrix.target == 'firefox' && 'firefox-mv3' || 'chrome-mv3' }}
+
+  smoke:
+    name: smoke (Innertube search + matcher)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:smoke
+
+  e2e:
+    name: e2e (headless Chromium)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Playwright Chromium + xvfb
+        # Ubuntu's apt `chromium-browser` package is a snap stub that doesn't
+        # run in containers, and Playwright already ships a working Chromium
+        # we can reuse. xvfb is a standard apt package though.
+        run: |
+          pnpm exec playwright install --with-deps chromium
+          sudo apt-get install -y xvfb
+      - name: Run e2e (headed under xvfb)
+        # YT Music renders a deprecated-browser splash + skips the player API
+        # in `--headless=new`. Headed under xvfb is the reliable path.
+        env:
+          HEADLESS: '0'
+        run: |
+          CHROME_BIN=$(node -p "require('playwright').chromium.executablePath()")
+          echo "Using $CHROME_BIN"
+          xvfb-run -a --server-args="-screen 0 1280x800x24" \
+            env CHROME_BIN="$CHROME_BIN" pnpm test:e2e:full
+        timeout-minutes: 20

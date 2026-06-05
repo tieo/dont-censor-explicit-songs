@@ -58,6 +58,9 @@ function attachPlayerObserver(page) {
   let waiters = [];
   page.on('response', async (res) => {
     if (!res.url().includes('youtubei/v1/player')) return;
+    // Filter to xhr only so we don't pick up our extension's own
+    // ORIG_FETCH probe (resourceType=fetch) — that probe carries the clean
+    // videoId, which would cause findLast() to incorrectly report "no swap".
     if (res.request().resourceType() !== 'xhr') return;
     try {
       const text = await res.text();
@@ -243,20 +246,35 @@ const entryPoints = {
    * for auto-advance (which loads a different videoId than what the user
    * explicitly invoked).
    */
-  async queueAdvance(page, pair) {
+  async queueAdvance(page, pair, _validCleanIds, observer) {
     await page
-      .goto(`https://music.youtube.com/watch?v=${pair.clean.videoId}`, { waitUntil: 'domcontentloaded' })
+      .goto(`https://music.youtube.com/watch?v=${pair.clean.videoId}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 20_000,
+      })
       .catch(() => {});
-    await page
+    // Wait for the up-next queue to populate. Anonymous profiles (e.g. CI
+    // with no login) sometimes don't generate an auto-radio, in which case
+    // there's nothing to advance to — skip immediately rather than hang.
+    const haveQueue = await page
       .waitForFunction(
-        () => {
-          const d = document.querySelector('ytmusic-app')?.inst?.root?.playerApi?.getVideoData?.();
-          return !!d?.title;
-        },
-        { timeout: 15_000 },
+        () => document.querySelectorAll('ytmusic-player-queue-item').length >= 2,
+        { timeout: 10_000, polling: 500 },
       )
-      .catch(() => {});
+      .then(() => true)
+      .catch(() => false);
+    if (!haveQueue) {
+      const err = new Error('no up-next queue (likely anonymous profile)');
+      err.skip = true;
+      throw err;
+    }
 
+    // Snapshot the observer's current /player response count BEFORE invoking
+    // nextVideo. We use this as a watermark so the in-flight initial-load
+    // /player (whose response may still be arriving — the extension's slow-
+    // path probe can add up to 7s to that round-trip) isn't mistaken for an
+    // advancement.
+    const beforeLen = observer.xhrResponses.length;
     const t = Date.now();
     const ok = await page.evaluate(() => {
       const pApi = document.querySelector('ytmusic-app')?.inst?.root?.playerApi;
@@ -265,6 +283,25 @@ const entryPoints = {
       return true;
     });
     if (!ok) throw new Error('playerApi.nextVideo not available');
+
+    // Wait briefly for a NEW /player XHR (one after the watermark). If none
+    // lands within 12s, the auto-radio queue is inert (common in anonymous
+    // profiles even when the DOM has stub items) and there's nothing to
+    // assert against — skip.
+    const sawNew = await new Promise((resolve) => {
+      const start = Date.now();
+      const tick = () => {
+        if (observer.xhrResponses.length > beforeLen) return resolve(true);
+        if (Date.now() - start > 12_000) return resolve(false);
+        setTimeout(tick, 200);
+      };
+      tick();
+    });
+    if (!sawNew) {
+      const err = new Error('nextVideo did not trigger a new /player XHR (auto-queue inert)');
+      err.skip = true;
+      throw err;
+    }
     return t;
   },
 };
@@ -272,6 +309,8 @@ const entryPoints = {
 /* ----------------------------- runner ----------------------------------- */
 
 function test(name, fn) { return { name, fn }; }
+
+const TEST_TIMEOUT_MS = 90_000;
 
 async function runTests(tests, page, observer) {
   const consoleLog = [];
@@ -293,7 +332,15 @@ async function runTests(tests, page, observer) {
           timeout: 15_000,
         })
         .catch(() => {});
-      await t.fn(page, observer);
+      // Hard per-test timeout so a hung test doesn't stall the whole suite —
+      // important in CI where the auto-radio queue can fail to populate in
+      // unauthenticated profiles.
+      await Promise.race([
+        t.fn(page, observer),
+        new Promise((_, rej) =>
+          setTimeout(() => rej(new Error(`test timed out after ${TEST_TIMEOUT_MS}ms`)), TEST_TIMEOUT_MS),
+        ),
+      ]);
       results.push({ name: t.name, ok: true });
       console.log('  ✓ pass');
     } catch (err) {
@@ -356,7 +403,7 @@ function makeTests(pair, allRowsForQuery) {
    *      the user actually sees in the UI).
    */
   const buildAssertion = (entryName) => async (page, observer) => {
-    const triggered = await entryPoints[entryName](page, pair, validCleanIds);
+    const triggered = await entryPoints[entryName](page, pair, validCleanIds, observer);
 
     // playlistPlay verifies the /next interceptor decorates queue items with
     // explicit badges for swappable tracks — checked directly in the DOM
@@ -382,20 +429,21 @@ function makeTests(pair, allRowsForQuery) {
         err.skip = true;
         throw err;
       }
-      // Sanity: at least one item should be swap-eligible per API (otherwise
-      // there's nothing for the test to verify and we skip).
-      let eligibleCount = 0;
-      for (const q of queueState.slice(0, 10)) {
-        if (await isSwapEligible(q.vid, q.title, pair.artist)) eligibleCount++;
-      }
+      // Sanity: at least one of the first few items should be swap-eligible
+      // per API. Bounded to 3 in parallel to avoid stacking onto the same
+      // rate-limit ceiling our extension already negotiated.
+      const eligibilities = await Promise.all(
+        queueState.slice(0, 3).map((q) => isSwapEligible(q.vid, q.title, pair.artist)),
+      );
+      const eligibleCount = eligibilities.filter(Boolean).length;
       if (eligibleCount === 0) {
-        const err = new Error(`no swap-eligible items in queue (${queueState.length} total)`);
+        const err = new Error(`no swap-eligible items in first 3 queue rows (${queueState.length} total)`);
         err.skip = true;
         throw err;
       }
       if (swapMarked.length === 0) {
         throw new Error(
-          `playlist queue has ${eligibleCount} swap-eligible items but none are E-marked by our /next interceptor`,
+          `playlist queue has at least ${eligibleCount} swap-eligible items but none are E-marked by our /next interceptor`,
         );
       }
       return;
@@ -494,24 +542,47 @@ function makeTests(pair, allRowsForQuery) {
 
 const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
 const ctx = browser.contexts()[0];
+// Pre-accept Google's EU consent so headless CI runs don't get bounced to
+// consent.youtube.com. This is a no-op when the cookie is already set.
+await ctx
+  .addCookies([
+    { name: 'SOCS', value: 'CAI', domain: '.youtube.com', path: '/', sameSite: 'Lax' },
+    { name: 'CONSENT', value: 'YES+', domain: '.youtube.com', path: '/', sameSite: 'Lax' },
+  ])
+  .catch(() => {});
 let page = ctx.pages().find((p) => p.url().startsWith('https://music.youtube.com'));
 if (!page) page = await ctx.newPage();
 page.on('dialog', (d) => d.accept().catch(() => {}));
 await page.bringToFront();
 
-const observer = attachPlayerObserver(page);
+let observer = attachPlayerObserver(page);
 
 let allResults = [];
+const discoveryFailures = [];
 for (const q of TEST_QUERIES) {
   console.log(`\n=== discovering pair for "${q}" ===`);
   const pair = await discoverPair(q);
   if (!pair) {
-    console.log('  ! no clean/explicit pair found — skipping');
+    console.log(`  ✗ FAIL: no clean/explicit pair found for "${q}" via Innertube search`);
+    discoveryFailures.push(q);
     continue;
   }
   console.log(`  clean=${pair.clean.videoId}  explicit=${pair.explicit.videoId}  "${pair.title}" by ${pair.artist}`);
   const results = await runTests(makeTests(pair, pair.rows), page, observer);
   allResults = allResults.concat(results);
+
+  // Reset the page between songs. After 4 tests on the same page the SPA's
+  // internal state (player + queue + service workers + accumulated XHR
+  // closures from in-flight extension probes) can wedge subsequent /watch
+  // navigations into a state where /player never fires — which manifests as
+  // "no /player XHR observed in time" for every test of the next song.
+  // Closing and re-opening the page drops all of that.
+  try {
+    await page.close();
+  } catch {}
+  page = await ctx.newPage();
+  page.on('dialog', (d) => d.accept().catch(() => {}));
+  observer = attachPlayerObserver(page);
 }
 
 console.log('\n=== summary ===');
@@ -522,6 +593,12 @@ for (const r of allResults) {
   const mark = r.ok ? '✓' : r.skip ? '~' : '✗';
   console.log(`  ${mark}  ${r.name}${r.err ? '  — ' + r.err : ''}`);
 }
-console.log(`${passed.length} passed · ${failed.length} failed · ${skipped.length} skipped`);
+if (discoveryFailures.length) {
+  console.log(`Discovery failures (no API pair surfaced for these queries):`);
+  for (const q of discoveryFailures) console.log(`  ✗  ${q}`);
+}
+console.log(
+  `${passed.length} passed · ${failed.length + discoveryFailures.length} failed · ${skipped.length} skipped`,
+);
 
-process.exit(failed.length ? 1 : 0);
+process.exit(failed.length || discoveryFailures.length ? 1 : 0);

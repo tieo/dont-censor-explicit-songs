@@ -35,7 +35,11 @@ if (!existsSync(EXT_DIR)) {
 const profileDir = mkdtempSync(join(tmpdir(), 'uncensor-e2e-'));
 const loadExt = existsSync(UBLOCK_DIR) ? `${EXT_DIR},${UBLOCK_DIR}` : EXT_DIR;
 
-console.log(`▶ spawning ${BROWSER_BIN} (profile=${profileDir} port=${PORT})`);
+// HEADLESS=0 to launch a visible window (useful for local debugging). Default
+// is headless so the same command runs in CI without a display server.
+const headless = process.env.HEADLESS !== '0';
+
+console.log(`▶ spawning ${BROWSER_BIN} (profile=${profileDir} port=${PORT} headless=${headless})`);
 const browser = spawn(
   BROWSER_BIN,
   [
@@ -46,6 +50,15 @@ const browser = spawn(
     '--no-default-browser-check',
     '--disable-features=DisableLoadExtensionCommandLineSwitch',
     '--mute-audio',
+    // Required when running as root in a container (CI). Harmless under a
+    // regular user.
+    '--no-sandbox',
+    '--disable-dev-shm-usage',
+    // YT Music rejects "HeadlessChrome" with a deprecated-browser splash, so
+    // we override the UA with a recent real-Chrome string. The Headless=new
+    // engine itself is current Chromium underneath.
+    '--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    ...(headless ? ['--headless=new', '--disable-gpu'] : []),
     'about:blank',
   ],
   { stdio: ['ignore', 'pipe', 'pipe'] },
