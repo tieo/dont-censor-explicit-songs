@@ -13,7 +13,13 @@
 // The /player call returns streaming URLs, so swapping its body's videoId means
 // the player loads the explicit stream directly. No DOM scraping, no player-bar.
 
-import { search, parseSearchResponse, pickExplicitSwap, type TrackRow } from '../src/ytmusic/index.js';
+import {
+  search,
+  parseSearchResponse,
+  pickExplicitSwap,
+  buildSearchQuery,
+  type TrackRow,
+} from '../src/ytmusic/index.js';
 
 export default defineContentScript({
   matches: ['*://music.youtube.com/*'],
@@ -93,7 +99,7 @@ export default defineContentScript({
       }
       const p = (async () => {
         try {
-          const json = await search(`${meta.title} ${meta.artist}`, {
+          const json = await search(buildSearchQuery(meta.title, meta.artist), {
             fetchImpl: ORIG_FETCH,
             timeoutMs: 4000,
           });

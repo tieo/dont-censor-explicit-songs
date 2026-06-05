@@ -3,7 +3,13 @@
 // CI fails loudly (this catches regressions in the matcher AND environmental
 // issues like region-based content filtering hiding the explicit version).
 
-import { search, parseSearchResponse, pickExplicitSwap } from '../src/ytmusic/index.ts';
+import {
+  search,
+  parseSearchResponse,
+  pickExplicitSwap,
+  buildSearchQuery,
+  stripArtistPrefix,
+} from '../src/ytmusic/index.ts';
 
 interface Case {
   title: string;
@@ -47,9 +53,56 @@ const cases: Case[] = [
 
 const failures: string[] = [];
 
+// Offline regression tests for the query-normalization helpers. These guard
+// the "Artist - Title (Official Video)" upload format which Google ranks
+// inconsistently when queried verbatim — we strip the noise before search()
+// to get a deterministic ranking, so the strip helpers themselves are what
+// the regression test needs to pin down.
+{
+  const cases: { in: [string, string]; expectPrefix?: string; expectQuery: string }[] = [
+    {
+      in: ['AJR - The DJ Is Crying For Help (Official Video)', 'AJR'],
+      expectPrefix: 'The DJ Is Crying For Help (Official Video)',
+      expectQuery: 'The DJ Is Crying For Help AJR',
+    },
+    {
+      in: ['HUMBLE.', 'Kendrick Lamar'],
+      expectQuery: 'HUMBLE. Kendrick Lamar',
+    },
+    {
+      in: ['Bohemian Rhapsody (Official Music Video) [Remastered]', 'Queen'],
+      expectQuery: 'Bohemian Rhapsody [Remastered] Queen',
+    },
+    {
+      in: ['WAP (feat. Megan Thee Stallion)', 'Cardi B'],
+      expectQuery: 'WAP (feat. Megan Thee Stallion) Cardi B',
+    },
+  ];
+  let unitFails = 0;
+  for (const c of cases) {
+    if (c.expectPrefix !== undefined) {
+      const got = stripArtistPrefix(c.in[0], c.in[1]);
+      if (got !== c.expectPrefix) {
+        console.log(`✗ stripArtistPrefix("${c.in[0]}", "${c.in[1]}") = "${got}"  expected "${c.expectPrefix}"`);
+        unitFails++;
+      }
+    }
+    const q = buildSearchQuery(c.in[0], c.in[1]);
+    if (q !== c.expectQuery) {
+      console.log(`✗ buildSearchQuery("${c.in[0]}", "${c.in[1]}") = "${q}"  expected "${c.expectQuery}"`);
+      unitFails++;
+    }
+  }
+  if (unitFails) {
+    console.log(`✗ ${unitFails} query-normalization unit failures`);
+    process.exit(1);
+  }
+  console.log(`✓ query-normalization helpers OK (${cases.length} cases)`);
+}
+
 for (const c of cases) {
   process.stdout.write(`\n▶ "${c.title}" by ${c.artist} (${c.durationSec ?? '?'}s)\n`);
-  const json = await search(`${c.title} ${c.artist}`);
+  const json = await search(buildSearchQuery(c.title, c.artist));
   const rows = parseSearchResponse(json);
   const explicitCount = rows.filter((r) => r.explicit).length;
   console.log(`  ${rows.length} candidates · ${explicitCount} explicit`);

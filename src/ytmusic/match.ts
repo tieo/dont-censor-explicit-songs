@@ -69,7 +69,7 @@ function variantSignature(title: string): string[] {
  * breaks the song-title prefix match against the bare song name, so we strip
  * it when present and the channel name matches the artist.
  */
-function stripArtistPrefix(title: string, artist: string): string {
+export function stripArtistPrefix(title: string, artist: string): string {
   if (!artist) return title;
   const t = title.trim();
   const a = artist.trim();
@@ -82,6 +82,31 @@ function stripArtistPrefix(title: string, artist: string): string {
   const m = rest.match(sepRx);
   if (!m) return title;
   return rest.slice(m[0].length);
+}
+
+/**
+ * Strip non-semantic upload tags from a title — e.g. "(Official Video)",
+ * "[Official Music Video]", "(Official Audio)", "(Lyric Video)", "(Visualizer)".
+ * Preserves variant markers (Live/Acoustic/Remix/...) AND feature credits
+ * (the normalizer handles those separately) so the match pipeline still sees
+ * the same signal. Used to clean queries before search() — Google's ranking
+ * is sensitive to long, tag-heavy strings and the explicit upload often
+ * falls out of the top results.
+ */
+const UPLOAD_TAG_RX =
+  /[\(\[][^)\]]*\b(?:official|music\s+video|audio|lyric(?:s)?\s+video|lyrics?|visualizer|hd|hq|4k|mv|m\/v|color\s*coded)\b[^)\]]*[\)\]]/gi;
+export function stripUploadTags(title: string): string {
+  return title.replace(UPLOAD_TAG_RX, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Build a normalized search query for the Innertube /search call. Strips
+ * "Artist - " prefix + upload tags so the explicit sibling reliably surfaces
+ * in the top results regardless of how the source title was formatted.
+ */
+export function buildSearchQuery(title: string, artist: string): string {
+  const cleaned = stripUploadTags(stripArtistPrefix(title, artist));
+  return `${cleaned} ${artist}`.trim();
 }
 
 function titleMatches(a: string, b: string, artistA?: string, artistB?: string): boolean {

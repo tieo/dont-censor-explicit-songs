@@ -13,7 +13,7 @@
 // is hardcoded.
 
 import { chromium } from 'playwright';
-import { search, parseSearchResponse } from '../src/ytmusic/index.ts';
+import { search, parseSearchResponse, buildSearchQuery } from '../src/ytmusic/index.ts';
 
 const CDP_PORT = Number(process.env.UNCENSOR_DEV_PORT ?? 9222);
 const PLAYER_RESPONSE_TIMEOUT_MS = 30_000;
@@ -372,7 +372,7 @@ function makeTests(pair, allRowsForQuery) {
   // track without an explicit version, in which case "no swap" is correct.
   async function isSwapEligible(videoId, title, artist) {
     try {
-      const json = await search(`${title} ${artist}`);
+      const json = await search(buildSearchQuery(title, artist));
       const rows = parseSearchResponse(json);
       const self = rows.find((r) => r.videoId === videoId);
       if (self?.explicit) return false; // already explicit — no swap needed
