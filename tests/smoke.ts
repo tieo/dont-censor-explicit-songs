@@ -6,7 +6,7 @@
 import {
   search,
   parseSearchResponse,
-  pickExplicitSwap,
+  findExplicitSwap,
   buildSearchQuery,
   stripArtistPrefix,
 } from '../src/ytmusic/index.ts';
@@ -48,6 +48,15 @@ const cases: Case[] = [
     title: 'AJR - The DJ Is Crying For Help (Official Video)',
     artist: 'AJR',
     durationSec: 220,
+  },
+  // Regression: clean (188s) and explicit (181s) durations differ by 7s on
+  // YT Music. The previous ±2s default tolerance rejected the only valid
+  // explicit candidate even though title + primary-artist + variant markers
+  // all matched.
+  {
+    title: "World's Smallest Violin",
+    artist: 'AJR',
+    durationSec: 188,
   },
 ];
 
@@ -102,14 +111,13 @@ const failures: string[] = [];
 
 for (const c of cases) {
   process.stdout.write(`\n▶ "${c.title}" by ${c.artist} (${c.durationSec ?? '?'}s)\n`);
-  const json = await search(buildSearchQuery(c.title, c.artist));
-  const rows = parseSearchResponse(json);
-  const explicitCount = rows.filter((r) => r.explicit).length;
-  console.log(`  ${rows.length} candidates · ${explicitCount} explicit`);
-
-  const swap = pickExplicitSwap(c, rows);
+  const q = buildSearchQuery(c.title, c.artist);
+  const swap = await findExplicitSwap(c, q);
   if (!swap) {
-    failures.push(`${c.title} by ${c.artist}: no explicit candidate found (${rows.length} rows, ${explicitCount} explicit)`);
+    // Dump top 10 of the *last* attempt to give debug signal.
+    const json = await search(q);
+    const rows = parseSearchResponse(json);
+    failures.push(`${c.title} by ${c.artist}: no explicit candidate found (${rows.length} rows, ${rows.filter((r) => r.explicit).length} explicit)`);
     console.log(`  ✗ FAIL: no explicit swap candidate. Top 10 candidates:`);
     for (const r of rows.slice(0, 10)) {
       console.log(`     ${r.explicit ? 'E' : '.'}  ${r.videoId}  ${r.durationSec}s  "${r.title}" by ${r.artist}`);

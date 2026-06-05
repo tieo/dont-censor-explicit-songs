@@ -2,6 +2,8 @@
 // and which candidate to swap to.
 
 import type { TrackRow } from './parse';
+import { parseSearchResponse } from './parse';
+import { search, type SearchOptions } from './client';
 
 export interface MatchInput {
   title: string;
@@ -12,7 +14,16 @@ export interface MatchInput {
 }
 
 export interface MatchOptions {
-  /** Acceptable duration delta in seconds (default 2). */
+  /**
+   * Acceptable duration delta in seconds (default 10). YT Music's clean and
+   * explicit uploads are usually the same recording but the durations
+   * reported in /next and /search can drift by several seconds — observed
+   * differences up to 7s on AJR's "World's Smallest Violin" (188s clean vs
+   * 181s explicit). Title + primary-artist + variant-marker matching is what
+   * really keeps the swap correct; duration is just a sanity gate against
+   * cross-song collisions, so a generous bound is preferable to false
+   * negatives.
+   */
   durationToleranceSec?: number;
 }
 
@@ -142,7 +153,7 @@ export function pickExplicitSwap(
   candidates: TrackRow[],
   opts: MatchOptions = {}
 ): TrackRow | null {
-  const tol = opts.durationToleranceSec ?? 2;
+  const tol = opts.durationToleranceSec ?? 10;
 
   const filtered = candidates.filter((c) => {
     if (c.videoId === input.videoId) return false;
@@ -166,4 +177,32 @@ export function pickExplicitSwap(
     return da - db;
   });
   return filtered[0];
+}
+
+/**
+ * Search + match in one call. If the first search returns no viable
+ * candidate, retries once — YT Music's ranker can reshuffle which uploads
+ * land in the top page (observed on AJR's "The DJ Is Crying For Help",
+ * where the explicit upload falls out of the top 20 maybe 1 call in 10).
+ * A second attempt almost always recovers it.
+ */
+export async function findExplicitSwap(
+  input: MatchInput,
+  query: string,
+  searchOpts: SearchOptions = {},
+  matchOpts: MatchOptions = {},
+): Promise<TrackRow | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const json = await search(query, searchOpts);
+    const rows = parseSearchResponse(json);
+    // Also let the caller signal "this is already explicit" — if the input's
+    // own videoId came back tagged explicit, no swap is needed.
+    if (input.videoId) {
+      const self = rows.find((r) => r.videoId === input.videoId);
+      if (self?.explicit) return null;
+    }
+    const swap = pickExplicitSwap(input, rows, matchOpts);
+    if (swap) return swap;
+  }
+  return null;
 }

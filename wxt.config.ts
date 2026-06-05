@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 const pkg = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf8'));
 
 export default defineConfig({
-  manifest: {
+  manifest: ({ browser }) => ({
     name: "Don't Censor Explicit Songs",
     description:
       'Automatically replaces clean versions of songs on YouTube Music with their explicit counterparts.',
@@ -19,7 +19,19 @@ export default defineConfig({
       96: 'icon/96.png',
       128: 'icon/128.png',
     },
-  },
+    // Firefox / Zen / forks need a stable extension ID. Without it Firefox
+    // generates a random one on temporary install (lost on restart) and
+    // refuses permanent install entirely. Chrome MV3 doesn't accept the
+    // key, so only emit it for Gecko targets.
+    ...(browser === 'firefox' && {
+      browser_specific_settings: {
+        gecko: {
+          id: 'dont-censor-explicit-songs@tieo.github.io',
+          strict_min_version: '128.0',
+        },
+      },
+    }),
+  }),
   srcDir: '.',
   entrypointsDir: 'entrypoints',
   webExt: {

@@ -121,10 +121,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build zips
         if: steps.ver.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           pnpm zip
           pnpm zip:firefox
-          ls .output/*.zip
+          # Firefox/Zen treat .xpi as installable; .zip downloads as a file.
+          # Same bytes, different filename → user can install via drag-drop
+          # into about:addons.
+          cp ".output/dont-censor-explicit-songs-${VERSION}-firefox.zip" \
+             ".output/dont-censor-explicit-songs-${VERSION}-firefox.xpi"
+          ls .output/dont-censor-explicit-songs-${VERSION}*
       - name: Create tag + release
         if: steps.ver.outputs.exists == 'false'
         env:
@@ -136,7 +143,8 @@ jobs:
           git push origin "$TAG"
           gh release create "$TAG" \
             --title "$TAG" \
-            --notes "Built from ${GITHUB_SHA::7}. Chrome + Firefox MV3 zips attached." \
+            --notes "Built from ${GITHUB_SHA::7}. See README for install instructions — Firefox/Zen need temporary load via about:debugging (unsigned XPI)." \
             .output/dont-censor-explicit-songs-${VERSION}-chrome.zip \
+            .output/dont-censor-explicit-songs-${VERSION}-firefox.xpi \
             .output/dont-censor-explicit-songs-${VERSION}-firefox.zip \
             .output/dont-censor-explicit-songs-${VERSION}-sources.zip

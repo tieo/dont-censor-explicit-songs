@@ -14,11 +14,8 @@
 // the player loads the explicit stream directly. No DOM scraping, no player-bar.
 
 import {
-  search,
-  parseSearchResponse,
-  pickExplicitSwap,
+  findExplicitSwap,
   buildSearchQuery,
-  type TrackRow,
 } from '../src/ytmusic/index.js';
 
 export default defineContentScript({
@@ -99,17 +96,11 @@ export default defineContentScript({
       }
       const p = (async () => {
         try {
-          const json = await search(buildSearchQuery(meta.title, meta.artist), {
-            fetchImpl: ORIG_FETCH,
-            timeoutMs: 4000,
-          });
-          const rows: TrackRow[] = parseSearchResponse(json);
-          const selfRow = rows.find((r) => r.videoId === meta.videoId);
-          if (selfRow?.explicit) {
-            swapCache.set(meta.videoId, null);
-            return null;
-          }
-          const swap = pickExplicitSwap(meta, rows);
+          const swap = await findExplicitSwap(
+            meta,
+            buildSearchQuery(meta.title, meta.artist),
+            { fetchImpl: ORIG_FETCH, timeoutMs: 4000 },
+          );
           const id = swap?.videoId ?? null;
           swapCache.set(meta.videoId, id);
           if (id) log(`prepared swap "${meta.title}" by ${meta.artist}: ${meta.videoId} → ${id}`);

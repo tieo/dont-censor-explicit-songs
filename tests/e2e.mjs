@@ -304,6 +304,88 @@ const entryPoints = {
     }
     return t;
   },
+
+  /**
+   * Click an UPCOMING queue item (NOT the now-playing one) and verify the
+   * SPA fires /player for that item's videoId — which the extension must
+   * swap to an explicit sibling if one exists.
+   *
+   * This was missing coverage: `playlistPlay` only validated badge stamping
+   * on /next; `queueAdvance` invoked the player API directly. Neither
+   * exercised "user clicks a clean track sitting in the queue", which is
+   * what surfaced the live WSV/AJR bug where queue duration metadata
+   * (188s) was 7s off the explicit upload (181s) and the matcher's old ±2s
+   * tolerance rejected the only viable swap. Handed off in adaptive mode
+   * since the auto-radio queue can land on any track — if the API has no
+   * explicit sibling, "no swap" is correct.
+   */
+  async queueItemClick(page, pair, _validCleanIds, observer) {
+    const listId = `RDAMVM${pair.clean.videoId}`;
+    await page
+      .goto(
+        `https://music.youtube.com/watch?v=${pair.clean.videoId}&list=${listId}`,
+        { waitUntil: 'domcontentloaded', timeout: 20_000 },
+      )
+      .catch(() => {});
+    const haveQueue = await page
+      .waitForFunction(
+        () => document.querySelectorAll('ytmusic-player-queue-item').length >= 3,
+        { timeout: 15_000, polling: 500 },
+      )
+      .then(() => true)
+      .catch(() => false);
+    if (!haveQueue) {
+      const err = new Error('no up-next queue (likely anonymous profile)');
+      err.skip = true;
+      throw err;
+    }
+
+    // Find the first upcoming (NOT now-playing) clean-per-DOM item and
+    // click it. The DOM's queue ordering is current-first, so index 1+ is
+    // upcoming.
+    const beforeLen = observer.xhrResponses.length;
+    const t = Date.now();
+    const clicked = await page.evaluate(() => {
+      const items = [...document.querySelectorAll('ytmusic-player-queue-item')];
+      for (let i = 1; i < items.length; i++) {
+        const item = items[i];
+        let vid;
+        try { vid = item.data?.videoId ?? item.__data?.videoId; } catch {}
+        if (!vid) continue;
+        const hasE = !!item.querySelector('ytmusic-inline-badge-renderer');
+        if (hasE) continue; // already explicit per UI — skip, we want clean
+        const title = item.querySelector('yt-formatted-string')?.textContent?.trim() ?? '';
+        const author = item.querySelector('.byline')?.textContent?.trim().split('•')[0]?.trim() ?? '';
+        item.click();
+        return { vid, title, author };
+      }
+      return null;
+    });
+    if (!clicked) {
+      const err = new Error('no clean upcoming queue item to click');
+      err.skip = true;
+      throw err;
+    }
+
+    // Wait briefly for the click to fire /player. If nothing fires, the
+    // SPA's click handler didn't take (rare race during queue rendering) —
+    // skip, not fail.
+    const sawNew = await new Promise((resolve) => {
+      const start = Date.now();
+      const tick = () => {
+        if (observer.xhrResponses.length > beforeLen) return resolve(true);
+        if (Date.now() - start > 12_000) return resolve(false);
+        setTimeout(tick, 200);
+      };
+      tick();
+    });
+    if (!sawNew) {
+      const err = new Error('queue-item click did not trigger /player');
+      err.skip = true;
+      throw err;
+    }
+    return { at: t, clickedVideoId: clicked.vid, adaptive: true };
+  },
 };
 
 /* ----------------------------- runner ----------------------------------- */
@@ -533,7 +615,8 @@ function makeTests(pair, allRowsForQuery) {
   return [
     test(`${tag} directUrl(clean) → audio + badge become explicit`, buildAssertion('directUrl')),
     test(`${tag} searchAndClick(clean row) → audio + badge become explicit`, buildAssertion('searchAndClick')),
-    test(`${tag} playlistPlay(click upcoming-queue item) → audio + badge consistent with swap-eligibility`, buildAssertion('playlistPlay')),
+    test(`${tag} playlistPlay(/next badge stamping) → swap-eligible queue items get E badge`, buildAssertion('playlistPlay')),
+    test(`${tag} queueItemClick(click upcoming row) → /player swap when API has explicit sibling`, buildAssertion('queueItemClick')),
     test(`${tag} queueAdvance(playerApi.nextVideo) → audio + badge stay explicit`, buildAssertion('queueAdvance')),
   ];
 }
