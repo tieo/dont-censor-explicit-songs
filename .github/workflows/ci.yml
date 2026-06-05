@@ -83,3 +83,60 @@ jobs:
           xvfb-run -a --server-args="-screen 0 1280x800x24" \
             env CHROME_BIN="$CHROME_BIN" pnpm test:e2e:full
         timeout-minutes: 20
+
+  release:
+    name: release (tag + zips)
+    runs-on: ubuntu-latest
+    needs: [build, smoke, e2e]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Resolve version + skip if tag exists
+        id: ver
+        run: |
+          VERSION=$(jq -r .version package.json)
+          TAG="v$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build zips
+        if: steps.ver.outputs.exists == 'false'
+        run: |
+          pnpm zip
+          pnpm zip:firefox
+          ls .output/*.zip
+      - name: Create tag + release
+        if: steps.ver.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          git tag "$TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes "Built from ${GITHUB_SHA::7}. Chrome + Firefox MV3 zips attached." \
+            .output/dont-censor-explicit-songs-${VERSION}-chrome.zip \
+            .output/dont-censor-explicit-songs-${VERSION}-firefox.zip \
+            .output/dont-censor-explicit-songs-${VERSION}-sources.zip

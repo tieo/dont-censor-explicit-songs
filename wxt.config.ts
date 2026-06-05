@@ -1,12 +1,15 @@
 import { defineConfig } from 'wxt';
 import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+
+const pkg = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf8'));
 
 export default defineConfig({
   manifest: {
     name: "Don't Censor Explicit Songs",
     description:
       'Automatically replaces clean versions of songs on YouTube Music with their explicit counterparts.',
-    version: '0.1.0',
+    version: pkg.version,
     permissions: ['storage'],
     host_permissions: ['*://music.youtube.com/*'],
     icons: {
