@@ -544,7 +544,7 @@ async function runTests(tests, page, observer) {
       results.push({ name: t.name, ok: true });
       console.log('  ✓ pass');
     } catch (err) {
-      const relevant = consoleLog.filter((l) => l.at >= t0).slice(-15);
+      const relevant = consoleLog.filter((l) => l.at >= t0).slice(-40);
       const ctx = relevant.map((l) => `      ${l.text}`).join('\n');
       if (err.skip) {
         results.push({ name: t.name, skip: true, err: err.message });
@@ -823,7 +823,13 @@ function makeAudioSwapTest(mv) {
       .then(() => true)
       .catch(() => false);
     if (!stripped) {
-      throw new Error('audio-swap ON but player retained video-mode (black frame risk)');
+      const diag = await page.evaluate(() => {
+        const els = [...document.querySelectorAll('ytmusic-player, ytmusic-player-page')];
+        return els.map((el) => `${el.tagName.toLowerCase()}[video-mode=${el.getAttribute('video-mode')}]`);
+      });
+      throw new Error(
+        `audio-swap ON but player retained video-mode (black frame risk). hit=${hit.videoId}/${hit.musicVideoType}; els=${JSON.stringify(diag)}`,
+      );
     }
   });
 }
