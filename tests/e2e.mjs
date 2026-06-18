@@ -757,6 +757,16 @@ function makeMusicVideoTest(mv) {
       })
       .catch(() => {});
     const hit = await observer.waitForXhrAfter(t);
+    // An undefined videoId/type means /player returned no playable stream for
+    // this upload — age/region gating in an anonymous CI profile, not a swap.
+    // Nothing to assert about the surface; skip rather than report a regression.
+    if (hit.videoId == null) {
+      const err = new Error(
+        `source music video ${mv.clean.videoId} returned no playable /player data (gated/anon profile)`,
+      );
+      err.skip = true;
+      throw err;
+    }
     const cls = surfaceClass(hit.musicVideoType);
     if (cls === 'audio') {
       throw new Error(

@@ -171,7 +171,10 @@ export default defineContentScript({
     // When a video source was swapped to audio-only, the SPA still thinks it's
     // playing a music video and keeps the `video-mode` surface (black frame for
     // an audio stream). Strip that attribute to force cover-art mode. The SPA
-    // re-asserts it as the new stream loads, so we re-strip on a short interval.
+    // re-asserts it as the (now audio) stream loads — and on slower machines
+    // that can land several seconds later — so we watch for re-adds with a
+    // MutationObserver and strip them for a bounded window, rather than betting
+    // on a fixed delay being long enough.
     function forceAudioMode(): void {
       const strip = () => {
         for (const sel of ['ytmusic-player', 'ytmusic-player-page']) {
@@ -181,11 +184,13 @@ export default defineContentScript({
         }
       };
       strip();
-      let ticks = 0;
-      const iv = setInterval(() => {
-        strip();
-        if (++ticks >= 30) clearInterval(iv); // ~3s at 100ms
-      }, 100);
+      const obs = new MutationObserver(strip);
+      obs.observe(document.documentElement, {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['video-mode'],
+      });
+      setTimeout(() => obs.disconnect(), 15000);
     }
 
     function isNextCall(url: string): boolean {
