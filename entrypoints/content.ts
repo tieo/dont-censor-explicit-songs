@@ -16,7 +16,9 @@
 import {
   findExplicitSwap,
   buildSearchQuery,
+  surfaceClass,
 } from '../src/ytmusic/index.js';
+import { DEFAULT_PREFS, PREFS_MESSAGE_SOURCE, type Prefs } from '../src/prefs';
 
 export default defineContentScript({
   matches: ['*://music.youtube.com/*'],
@@ -35,6 +37,25 @@ export default defineContentScript({
     const swapCache = new Map<string, string | null>();
     // videoId → in-flight resolution promise (de-dupe)
     const pending = new Map<string, Promise<string | null>>();
+    // Source videoIds whose swap drops video for audio (OMV/UGC → ATV). After
+    // their /player swap we nudge the SPA into cover-art mode.
+    const audioSwapForVideo = new Set<string>();
+
+    // Live prefs, fed by the ISOLATED-world bridge over window.postMessage
+    // (MAIN world can't read chrome.storage directly). Defaults until the
+    // first message lands.
+    let prefs: Prefs = { ...DEFAULT_PREFS };
+    window.addEventListener('message', (e) => {
+      if (e.source !== window) return;
+      const data = e.data as { source?: string; prefs?: Prefs } | undefined;
+      if (data?.source === PREFS_MESSAGE_SOURCE && data.prefs) {
+        prefs = data.prefs;
+        log('prefs updated', prefs);
+      }
+    });
+    // Ask the bridge to (re)broadcast in case it posted before this listener
+    // was wired.
+    window.postMessage({ source: PREFS_MESSAGE_SOURCE + ':request' }, '*');
 
     interface TrackMeta {
       videoId: string;
@@ -118,9 +139,20 @@ export default defineContentScript({
             meta,
             buildSearchQuery(meta.title, meta.artist),
             { fetchImpl: ORIG_FETCH, timeoutMs: 4000 },
+            { allowVideoToAudio: prefs.musicVideoAudioSwap },
           );
           const id = swap?.videoId ?? null;
           swapCache.set(meta.videoId, id);
+          // A video source swapped to an audio-only (ATV) candidate must drop
+          // the SPA into cover-art mode, else the player keeps the video
+          // surface and shows a black frame for the audio stream.
+          if (
+            swap &&
+            surfaceClass(meta.musicVideoType) === 'video' &&
+            surfaceClass(swap.musicVideoType) === 'audio'
+          ) {
+            audioSwapForVideo.add(meta.videoId);
+          }
           if (id) log(`prepared swap "${meta.title}" by ${meta.artist}: ${meta.videoId} → ${id}`);
           else log(`no explicit found for "${meta.title}" by ${meta.artist} (${meta.videoId})`);
           return id;
@@ -134,6 +166,26 @@ export default defineContentScript({
       })();
       pending.set(meta.videoId, p);
       return p;
+    }
+
+    // When a video source was swapped to audio-only, the SPA still thinks it's
+    // playing a music video and keeps the `video-mode` surface (black frame for
+    // an audio stream). Strip that attribute to force cover-art mode. The SPA
+    // re-asserts it as the new stream loads, so we re-strip on a short interval.
+    function forceAudioMode(): void {
+      const strip = () => {
+        for (const sel of ['ytmusic-player', 'ytmusic-player-page']) {
+          for (const el of Array.from(document.querySelectorAll(sel))) {
+            if (el.hasAttribute('video-mode')) el.removeAttribute('video-mode');
+          }
+        }
+      };
+      strip();
+      let ticks = 0;
+      const iv = setInterval(() => {
+        strip();
+        if (++ticks >= 30) clearInterval(iv); // ~3s at 100ms
+      }, 100);
     }
 
     function isNextCall(url: string): boolean {
@@ -292,6 +344,7 @@ export default defineContentScript({
           parsed.videoId = swap;
           const newBody = JSON.stringify(parsed);
           log(`/player swap (cache): ${videoId} → ${swap}`);
+          if (audioSwapForVideo.has(videoId)) forceAudioMode();
           return ORIG_XHR_SEND.call(this, newBody);
         }
         log(`/player no swap (cache): ${videoId}`);
@@ -316,6 +369,7 @@ export default defineContentScript({
         if (xhrSent) return;
         xhrSent = true;
         parsed.videoId = swap;
+        if (audioSwapForVideo.has(videoId)) forceAudioMode();
         ORIG_XHR_SEND.call(this, JSON.stringify(parsed));
       };
       const budgetTimer = setTimeout(() => {

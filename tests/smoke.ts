@@ -166,11 +166,34 @@ const failures: string[] = [];
     check(swap?.videoId === 'expV', 'video source should swap to a video-class explicit candidate');
   }
 
+  // 4. Video source + ONLY explicit ATV, with allowVideoToAudio opt-in → swap to
+  //    the audio candidate (the popup toggle path; content.ts then forces
+  //    cover-art mode so there's no black frame).
+  {
+    const swap = pickExplicitSwap(
+      { title: 'Song', artist: 'Artist', durationSec: 180, videoId: 'cleanVid', musicVideoType: OMV },
+      [row({ videoId: 'expA', explicit: true, musicVideoType: ATV })],
+      { allowVideoToAudio: true },
+    );
+    check(swap?.videoId === 'expA', 'video source WITH allowVideoToAudio should swap to explicit ATV');
+  }
+
+  // 5. allowVideoToAudio must NOT relax an audio source into accepting video —
+  //    the opt-in is video→audio only, never audio→video.
+  {
+    const swap = pickExplicitSwap(
+      { title: 'Song', artist: 'Artist', durationSec: 180, videoId: 'clean', musicVideoType: ATV },
+      [row({ videoId: 'expV', explicit: true, musicVideoType: OMV })],
+      { allowVideoToAudio: true },
+    );
+    check(swap === null, 'audio source must NOT accept video candidate even with allowVideoToAudio');
+  }
+
   if (unitFails) {
     console.log(`✗ ${unitFails} surface-compatibility unit failures`);
     process.exit(1);
   }
-  console.log('✓ surface-compatibility helpers OK (7 cases)');
+  console.log('✓ surface-compatibility helpers OK (9 cases)');
 }
 
 for (const c of cases) {

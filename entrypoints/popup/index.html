@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Don't Censor Explicit Songs</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        width: 320px;
+        font-family: system-ui, -apple-system, sans-serif;
+        background: #0f0f0f;
+        color: #f1f1f1;
+      }
+      header {
+        padding: 14px 16px 10px;
+        border-bottom: 1px solid #272727;
+      }
+      header h1 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      header p {
+        margin: 4px 0 0;
+        font-size: 11px;
+        color: #aaa;
+      }
+      .row {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 14px 16px;
+      }
+      .row label {
+        flex: 1;
+        font-size: 13px;
+        line-height: 1.35;
+      }
+      .row label small {
+        display: block;
+        margin-top: 3px;
+        color: #aaa;
+        font-size: 11px;
+      }
+      .switch {
+        position: relative;
+        flex: 0 0 auto;
+        width: 38px;
+        height: 22px;
+        margin-top: 1px;
+      }
+      .switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .slider {
+        position: absolute;
+        inset: 0;
+        cursor: pointer;
+        background: #555;
+        border-radius: 22px;
+        transition: background 0.15s;
+      }
+      .slider::before {
+        content: '';
+        position: absolute;
+        height: 16px;
+        width: 16px;
+        left: 3px;
+        top: 3px;
+        background: #fff;
+        border-radius: 50%;
+        transition: transform 0.15s;
+      }
+      input:checked + .slider {
+        background: #ff0033;
+      }
+      input:checked + .slider::before {
+        transform: translateX(16px);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Don't Censor Explicit Songs</h1>
+      <p>Swaps clean tracks for their explicit versions on YouTube Music.</p>
+    </header>
+    <div class="row">
+      <label for="mvAudioSwap">
+        Uncensor music videos as audio
+        <small>When a music video has no explicit video version, play the explicit audio instead (drops the video).</small>
+      </label>
+      <span class="switch">
+        <input type="checkbox" id="mvAudioSwap" />
+        <span class="slider"></span>
+      </span>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

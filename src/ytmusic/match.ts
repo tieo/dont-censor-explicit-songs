@@ -43,6 +43,12 @@ export interface MatchOptions {
    * negatives.
    */
   durationToleranceSec?: number;
+  /**
+   * When the source is a music video (OMV/UGC) with no explicit video sibling,
+   * allow falling back to an explicit audio-only (ATV) candidate. The player
+   * drops to cover art. Off by default — opt-in via the popup toggle.
+   */
+  allowVideoToAudio?: boolean;
 }
 
 function normalize(s: string): string {
@@ -173,14 +179,20 @@ export function pickExplicitSwap(
 ): TrackRow | null {
   const tol = opts.durationToleranceSec ?? 10;
   const wantClass = surfaceClass(input.musicVideoType);
+  // A video source may fall back to an audio candidate only when explicitly
+  // allowed (popup toggle). An audio source never accepts a video candidate —
+  // that would inject unwanted video into a song.
+  const audioFallback = opts.allowVideoToAudio === true && wantClass === 'video';
 
   const filtered = candidates.filter((c) => {
     if (c.videoId === input.videoId) return false;
     if (!c.explicit) return false;
     // Playback-compatibility gate: never swap a video-surface track to an
     // audio-only candidate (or vice versa) — the mismatch is what causes the
-    // black-screen-on-music-video bug.
-    if (surfaceClass(c.musicVideoType) !== wantClass) return false;
+    // black-screen-on-music-video bug. The audioFallback opt-in relaxes this
+    // for video→audio only.
+    const cClass = surfaceClass(c.musicVideoType);
+    if (cClass !== wantClass && !(audioFallback && cClass === 'audio')) return false;
     if (!titleMatches(c.title, input.title, c.artist, input.artist)) return false;
     if (!artistMatches(c.artist, input.artist)) return false;
     if (input.durationSec != null && c.durationSec != null) {
@@ -191,8 +203,12 @@ export function pickExplicitSwap(
 
   if (filtered.length === 0) return null;
 
-  // Prefer the closest duration match, then the first result (highest YT ranking).
+  // Prefer a same-surface-class candidate (keep video when an explicit video
+  // exists), then the closest duration, then YT ranking order.
   filtered.sort((a, b) => {
+    const ca = surfaceClass(a.musicVideoType) === wantClass ? 0 : 1;
+    const cb = surfaceClass(b.musicVideoType) === wantClass ? 0 : 1;
+    if (ca !== cb) return ca - cb;
     const dur = input.durationSec;
     if (dur == null) return 0;
     const da = Math.abs((a.durationSec ?? dur) - dur);
@@ -215,26 +231,36 @@ export async function findExplicitSwap(
   searchOpts: SearchOptions = {},
   matchOpts: MatchOptions = {},
 ): Promise<TrackRow | null> {
-  // Audio (ATV) sources match against the Songs shelf (default). Video sources
-  // need the unfiltered shelf so OMV/UGC candidates are present — the Songs
-  // filter strips them, which would leave a video source with no compatible
-  // candidate. Caller may still override songsOnly explicitly.
-  const effectiveOpts: SearchOptions =
-    searchOpts.songsOnly === undefined && surfaceClass(input.musicVideoType) === 'video'
-      ? { ...searchOpts, songsOnly: false }
-      : searchOpts;
+  // Pick which search shelf(s) to query, in priority order, as a list of
+  // songsOnly values:
+  //   - Audio (ATV) sources match against the Songs shelf (default true).
+  //   - Video sources first try the unfiltered shelf so OMV/UGC video siblings
+  //     are present (the Songs filter strips them). If the popup's audio-swap
+  //     opt-in is on AND no video sibling is found, we fall back to the Songs
+  //     shelf to surface the explicit ATV audio — that candidate does NOT
+  //     appear in the unfiltered video results, so the audio fallback is dead
+  //     without this second pass.
+  //   - An explicit caller-supplied songsOnly always wins.
+  const isVideo = surfaceClass(input.musicVideoType) === 'video';
+  let shelves: boolean[];
+  if (searchOpts.songsOnly !== undefined) shelves = [searchOpts.songsOnly];
+  else if (isVideo) shelves = matchOpts.allowVideoToAudio ? [false, true] : [false];
+  else shelves = [true];
 
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const json = await search(query, effectiveOpts);
-    const rows = parseSearchResponse(json);
-    // Also let the caller signal "this is already explicit" — if the input's
-    // own videoId came back tagged explicit, no swap is needed.
-    if (input.videoId) {
-      const self = rows.find((r) => r.videoId === input.videoId);
-      if (self?.explicit) return null;
+  for (const songsOnly of shelves) {
+    const opts: SearchOptions = { ...searchOpts, songsOnly };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const json = await search(query, opts);
+      const rows = parseSearchResponse(json);
+      // Also let the caller signal "this is already explicit" — if the input's
+      // own videoId came back tagged explicit, no swap is needed.
+      if (input.videoId) {
+        const self = rows.find((r) => r.videoId === input.videoId);
+        if (self?.explicit) return null;
+      }
+      const swap = pickExplicitSwap(input, rows, matchOpts);
+      if (swap) return swap;
     }
-    const swap = pickExplicitSwap(input, rows, matchOpts);
-    if (swap) return swap;
   }
   return null;
 }

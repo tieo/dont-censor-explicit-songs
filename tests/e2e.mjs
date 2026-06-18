@@ -13,9 +13,25 @@
 // is hardcoded.
 
 import { chromium } from 'playwright';
-import { search, parseSearchResponse, buildSearchQuery, surfaceClass } from '../src/ytmusic/index.ts';
+import { createHash } from 'node:crypto';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { search, parseSearchResponse, buildSearchQuery, surfaceClass, pickExplicitSwap } from '../src/ytmusic/index.ts';
 
 const CDP_PORT = Number(process.env.UNCENSOR_DEV_PORT ?? 9222);
+
+// Unpacked-extension id is a hash of the absolute path Chromium loaded it from
+// (dev.mjs / test-e2e.mjs both pass `.output/chrome-mv3`). Derived the same way
+// Chromium does: sha256(path) → first 32 hex nibbles → mapped 0-f to a-p.
+const EXT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.output/chrome-mv3');
+function extIdForPath(p) {
+  return createHash('sha256')
+    .update(p)
+    .digest('hex')
+    .slice(0, 32)
+    .replace(/[0-9a-f]/g, (c) => String.fromCharCode(97 + parseInt(c, 16)));
+}
+const EXT_ID = extIdForPath(EXT_DIR);
 const PLAYER_RESPONSE_TIMEOUT_MS = 30_000;
 
 const TEST_QUERIES = [
@@ -62,6 +78,82 @@ async function discoverMusicVideo(query) {
   const pick =
     videos.find((r) => r.musicVideoType === 'MUSIC_VIDEO_TYPE_OMV') ?? videos[0];
   return pick ? { clean: pick, title: pick.title, artist: pick.artist } : null;
+}
+
+/**
+ * Find a clean music VIDEO (OMV/UGC) whose song HAS an explicit audio-only (ATV)
+ * sibling — the exact shape the popup's "uncensor music videos as audio" toggle
+ * targets.
+ *
+ * Critically, this mirrors the RUNTIME source of truth: at play time the
+ * extension reads the source track's real title/artist from the /player
+ * `videoDetails`, not from a search row (video-surface search rows parse with a
+ * bogus "Video" artist and no duration, which no matcher could match). So we
+ * (1) confirm via a Songs search that the song has a clean+explicit AUDIO pair
+ * (real metadata) and (2) locate a clean video upload of the same song by
+ * normalized title, then feed the AUDIO pair's metadata + the VIDEO upload's
+ * videoId into the production matcher — the precise meta /player will yield.
+ */
+function normTitle(s) {
+  return s
+    .toLowerCase()
+    .replace(/\((?:feat|ft|with)\.?[^)]*\)|\[(?:feat|ft|with)\.?[^\]]*\]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+async function discoverMusicVideoWithAudioSibling(query) {
+  const audio = await discoverPair(query);
+  if (!audio) return null;
+  const want = normTitle(audio.title);
+  const vrows = parseSearchResponse(await search(query, { songsOnly: false }));
+  for (const row of vrows) {
+    if (row.explicit) continue;
+    if (surfaceClass(row.musicVideoType) !== 'video') continue;
+    if (!row.videoId || row.videoId === audio.clean.videoId) continue;
+    if (normTitle(row.title) !== want) continue; // same song, no remix/live marker
+    // Source meta exactly as /player will report it: real title/artist (from the
+    // audio pair) + this video upload's id + its video surface type.
+    const meta = {
+      title: audio.title,
+      artist: audio.artist,
+      durationSec: audio.clean.durationSec,
+      videoId: row.videoId,
+      musicVideoType: row.musicVideoType,
+    };
+    const swap = pickExplicitSwap(meta, audio.rows, { allowVideoToAudio: true });
+    if (swap && surfaceClass(swap.musicVideoType) === 'audio') {
+      return {
+        clean: { videoId: row.videoId, musicVideoType: row.musicVideoType },
+        explicit: swap,
+        title: audio.title,
+        artist: audio.artist,
+      };
+    }
+  }
+  return null;
+}
+
+/** Toggle the popup's musicVideoAudioSwap pref by writing storage from an
+ *  extension page (popup.html has the chrome.storage API). Returns false if the
+ *  extension id couldn't be reached so the caller can skip rather than fail. */
+async function setAudioSwapPref(ctx, value) {
+  const pp = await ctx.newPage();
+  try {
+    await pp.goto(`chrome-extension://${EXT_ID}/popup.html`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 10_000,
+    });
+    await pp.evaluate(
+      (v) => new Promise((res) => chrome.storage.local.set({ prefs: { musicVideoAudioSwap: v } }, res)),
+      value,
+    );
+    return true;
+  } catch (err) {
+    console.log(`  ~ could not set audio-swap pref via popup (${err.message})`);
+    return false;
+  } finally {
+    await pp.close().catch(() => {});
+  }
 }
 
 /* ----------------------------- player observer -------------------------- */
@@ -679,6 +771,53 @@ function makeMusicVideoTest(mv) {
   });
 }
 
+/**
+ * Popup toggle path: with "uncensor music videos as audio" ON, a clean OMV
+ * whose song has an explicit ATV sibling MUST be swapped to that audio upload
+ * AND the player must drop `video-mode` (cover art, not a black video frame).
+ */
+function makeAudioSwapTest(mv) {
+  const tag = `[${mv.title} by ${mv.artist} · audio-swap ON]`;
+  return test(`${tag} OMV → explicit audio + cover-art (no black frame)`, async (page, observer) => {
+    const t = Date.now();
+    await page
+      .goto(`https://music.youtube.com/watch?v=${mv.clean.videoId}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 20_000,
+      })
+      .catch(() => {});
+    const hit = await observer.waitForXhrAfter(t);
+    if (hit.videoId === mv.clean.videoId) {
+      // The runtime /player metadata for this specific upload didn't yield a
+      // swap (age/region gating, or it self-reported explicit). Nothing to
+      // assert about the audio path — skip rather than fail on YT data variance.
+      const err = new Error(`OMV ${mv.clean.videoId} not swapped at runtime (no audio sibling matched)`);
+      err.skip = true;
+      throw err;
+    }
+    if (surfaceClass(hit.musicVideoType) !== 'audio') {
+      throw new Error(
+        `audio-swap ON expected an audio surface, got ${hit.musicVideoType} (videoId=${hit.videoId})`,
+      );
+    }
+    // forceAudioMode strips video-mode on an interval after the swap; poll until
+    // every player surface has dropped it.
+    const stripped = await page
+      .waitForFunction(
+        () => {
+          const els = [...document.querySelectorAll('ytmusic-player, ytmusic-player-page')];
+          return els.length > 0 && els.every((el) => !el.hasAttribute('video-mode'));
+        },
+        { timeout: 8_000, polling: 200 },
+      )
+      .then(() => true)
+      .catch(() => false);
+    if (!stripped) {
+      throw new Error('audio-swap ON but player retained video-mode (black frame risk)');
+    }
+  });
+}
+
 /* ----------------------------- main ------------------------------------- */
 
 const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
@@ -750,6 +889,47 @@ for (const q of TEST_QUERIES) {
   page = await ctx.newPage();
   page.on('dialog', (d) => d.accept().catch(() => {}));
   observer = attachPlayerObserver(page);
+}
+
+// Popup toggle path (audio-swap ON). Runs LAST so it doesn't perturb the
+// default-OFF guard above. Enable the pref, then for each query find an OMV with
+// an explicit audio sibling and assert it swaps to audio + cover-art. Best
+// effort: skip a query with no such pair rather than failing.
+{
+  console.log(`\n=== enabling audio-swap pref (ext ${EXT_ID}) ===`);
+  const prefSet = await setAudioSwapPref(ctx, true);
+  if (!prefSet) {
+    console.log('  ~ skip: audio-swap toggle tests (could not write pref)');
+  } else {
+    for (const q of TEST_QUERIES) {
+      console.log(`\n=== discovering audio-swappable music video for "${q}" ===`);
+      let mv;
+      try {
+        mv = await discoverMusicVideoWithAudioSibling(q);
+      } catch (err) {
+        console.log(`  ~ skip: discovery error (${err.message})`);
+        continue;
+      }
+      if (!mv) {
+        console.log(`  ~ skip: no clean OMV with explicit audio sibling for "${q}"`);
+        continue;
+      }
+      console.log(
+        `  video=${mv.clean.videoId} (${mv.clean.musicVideoType}) → audio=${mv.explicit.videoId} (${mv.explicit.musicVideoType})  "${mv.title}" by ${mv.artist}`,
+      );
+      const results = await runTests([makeAudioSwapTest(mv)], page, observer);
+      allResults = allResults.concat(results);
+      try {
+        await page.close();
+      } catch {}
+      page = await ctx.newPage();
+      page.on('dialog', (d) => d.accept().catch(() => {}));
+      observer = attachPlayerObserver(page);
+    }
+    // Restore default so a leftover profile doesn't carry the toggle into other
+    // runs.
+    await setAudioSwapPref(ctx, false);
+  }
 }
 
 console.log('\n=== summary ===');
