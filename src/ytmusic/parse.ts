@@ -9,6 +9,13 @@ export interface TrackRow {
   /** Duration in seconds. */
   durationSec?: number;
   explicit: boolean;
+  /**
+   * YT Music content type: MUSIC_VIDEO_TYPE_ATV (audio-only song, static art),
+   * _OMV (official music video), _UGC (user video). Drives whether a swap is
+   * playback-compatible — swapping a video-surface track to an audio-only one
+   * leaves the player rendering a black video frame.
+   */
+  musicVideoType?: string;
 }
 
 function walk(node: unknown, hits: Record<string, unknown>[] = []): Record<string, unknown>[] {
@@ -55,6 +62,40 @@ function videoIdFromRow(row: Record<string, unknown>): string | undefined {
     ?.playNavigationEndpoint?.watchEndpoint?.videoId;
 }
 
+type WatchMusicConfig = {
+  watchEndpoint?: {
+    watchEndpointMusicSupportedConfigs?: { watchEndpointMusicConfig?: { musicVideoType?: string } };
+  };
+};
+
+function musicVideoTypeFromRow(row: Record<string, unknown>): string | undefined {
+  // The type rides on the play-button endpoint (overlay) and the title run's
+  // navigationEndpoint — both under watchEndpoint.watchEndpointMusicSupportedConfigs.
+  const overlay = row.overlay as
+    | {
+        musicItemThumbnailOverlayRenderer?: {
+          content?: { musicPlayButtonRenderer?: { playNavigationEndpoint?: WatchMusicConfig } };
+        };
+      }
+    | undefined;
+  const fromOverlay =
+    overlay?.musicItemThumbnailOverlayRenderer?.content?.musicPlayButtonRenderer
+      ?.playNavigationEndpoint?.watchEndpoint?.watchEndpointMusicSupportedConfigs
+      ?.watchEndpointMusicConfig?.musicVideoType;
+  if (fromOverlay) return fromOverlay;
+
+  const flexColumns = row.flexColumns as
+    | { musicResponsiveListItemFlexColumnRenderer?: { text?: { runs?: { navigationEndpoint?: WatchMusicConfig }[] } } }[]
+    | undefined;
+  const runs = flexColumns?.[0]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs ?? [];
+  for (const r of runs) {
+    const t = r.navigationEndpoint?.watchEndpoint?.watchEndpointMusicSupportedConfigs
+      ?.watchEndpointMusicConfig?.musicVideoType;
+    if (t) return t;
+  }
+  return undefined;
+}
+
 function isExplicitRow(row: Record<string, unknown>): boolean {
   const badges = row.badges as { musicInlineBadgeRenderer?: { icon?: { iconType?: string } } }[] | undefined;
   return (
@@ -92,6 +133,7 @@ export function parseSearchResponse(json: unknown): TrackRow[] {
       album,
       durationSec,
       explicit: isExplicitRow(row),
+      musicVideoType: musicVideoTypeFromRow(row),
     });
   }
   return tracks;

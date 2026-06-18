@@ -42,6 +42,7 @@ export default defineContentScript({
       artist: string;
       durationSec?: number;
       explicit: boolean;
+      musicVideoType?: string;
     }
 
     // ---- Helpers ----------------------------------------------------------
@@ -56,6 +57,16 @@ export default defineContentScript({
     function textRuns(node: unknown): string {
       const n = node as { runs?: { text?: string }[] } | undefined;
       return n?.runs?.map((r) => r.text ?? '').join('') ?? '';
+    }
+
+    // Pull the YT Music content type (ATV/OMV/UGC) from a /next queue item's
+    // navigationEndpoint. Drives playback-compatible swap selection.
+    function musicVideoTypeFromRenderer(r: Record<string, unknown>): string | undefined {
+      const nav = r.navigationEndpoint as
+        | { watchEndpoint?: { watchEndpointMusicSupportedConfigs?: { watchEndpointMusicConfig?: { musicVideoType?: string } } } }
+        | undefined;
+      return nav?.watchEndpoint?.watchEndpointMusicSupportedConfigs?.watchEndpointMusicConfig
+        ?.musicVideoType;
     }
 
     // Walk /next response. Items are playlistPanelVideoRenderer.
@@ -78,7 +89,14 @@ export default defineContentScript({
             (b) => b.musicInlineBadgeRenderer?.icon?.iconType === 'MUSIC_EXPLICIT_BADGE'
           );
           if (videoId && title && artist) {
-            out.push({ videoId, title, artist, durationSec, explicit });
+            out.push({
+              videoId,
+              title,
+              artist,
+              durationSec,
+              explicit,
+              musicVideoType: musicVideoTypeFromRenderer(r),
+            });
           }
         }
         for (const v of Object.values(node)) visit(v);
@@ -329,6 +347,7 @@ export default defineContentScript({
               artist: vd.author,
               durationSec: vd.lengthSeconds ? Number(vd.lengthSeconds) : undefined,
               explicit: false, // /player response doesn't expose badges; assume false
+              musicVideoType: vd.musicVideoType,
             };
             const swap = await resolveExplicit(meta);
             if (swap && swap !== videoId) {

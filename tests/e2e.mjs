@@ -13,7 +13,7 @@
 // is hardcoded.
 
 import { chromium } from 'playwright';
-import { search, parseSearchResponse, buildSearchQuery } from '../src/ytmusic/index.ts';
+import { search, parseSearchResponse, buildSearchQuery, surfaceClass } from '../src/ytmusic/index.ts';
 
 const CDP_PORT = Number(process.env.UNCENSOR_DEV_PORT ?? 9222);
 const PLAYER_RESPONSE_TIMEOUT_MS = 30_000;
@@ -45,6 +45,25 @@ async function discoverPair(query) {
   return null;
 }
 
+/**
+ * Find a clean music VIDEO (OMV/UGC) to exercise the black-screen path. Uses an
+ * unfiltered search (the Songs filter strips video uploads) and picks the first
+ * non-explicit video-surface row with a real title/artist.
+ */
+async function discoverMusicVideo(query) {
+  const json = await search(query, { songsOnly: false });
+  const rows = parseSearchResponse(json);
+  const videos = rows.filter(
+    (r) => !r.explicit && surfaceClass(r.musicVideoType) === 'video' && r.videoId && r.title && r.artist,
+  );
+  // Prefer OMV (official music video) — it reliably carries a video stream, so
+  // the "no black frame" assertion is meaningful. UGC uploads are sometimes
+  // audio-only ("[Audio]" reuploads) which would confound the stream check.
+  const pick =
+    videos.find((r) => r.musicVideoType === 'MUSIC_VIDEO_TYPE_OMV') ?? videos[0];
+  return pick ? { clean: pick, title: pick.title, artist: pick.artist } : null;
+}
+
 /* ----------------------------- player observer -------------------------- */
 
 /**
@@ -70,6 +89,13 @@ function attachPlayerObserver(page) {
         videoId: j.videoDetails?.videoId,
         title: j.videoDetails?.title,
         author: j.videoDetails?.author,
+        musicVideoType: j.videoDetails?.musicVideoType,
+        // A video-surface track must carry an actual video stream. If a music
+        // video gets swapped to an audio-only upload, adaptiveFormats has no
+        // video/* mime → the player renders a black frame.
+        hasVideoStream: (j.streamingData?.adaptiveFormats ?? []).some((f) =>
+          (f.mimeType ?? '').startsWith('video/'),
+        ),
       });
       const w = waiters; waiters = [];
       w.forEach((r) => r());
@@ -621,6 +647,38 @@ function makeTests(pair, allRowsForQuery) {
   ];
 }
 
+/**
+ * Music-video black-screen guard. Plays a clean OMV/UGC track by direct URL and
+ * asserts the /player response the SPA actually consumes is still a video
+ * surface with a real video stream — i.e. the extension did NOT swap it to an
+ * audio-only ATV upload (which is what caused the black-screen-on-autoplay bug).
+ * No swap (clean video plays) is acceptable; a swap to audio is NOT.
+ */
+function makeMusicVideoTest(mv) {
+  const tag = `[${mv.title} by ${mv.artist} · music video]`;
+  return test(`${tag} play OMV → stays a video surface (no black screen)`, async (page, observer) => {
+    const t = Date.now();
+    await page
+      .goto(`https://music.youtube.com/watch?v=${mv.clean.videoId}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 20_000,
+      })
+      .catch(() => {});
+    const hit = await observer.waitForXhrAfter(t);
+    const cls = surfaceClass(hit.musicVideoType);
+    if (cls === 'audio') {
+      throw new Error(
+        `music video ${mv.clean.videoId} played as AUDIO (videoId=${hit.videoId}, type=${hit.musicVideoType}) — black-screen swap regression`,
+      );
+    }
+    if (!hit.hasVideoStream) {
+      throw new Error(
+        `music video ${mv.clean.videoId} played with no video stream (videoId=${hit.videoId}, type=${hit.musicVideoType}) — black frame`,
+      );
+    }
+  });
+}
+
 /* ----------------------------- main ------------------------------------- */
 
 const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
@@ -660,6 +718,32 @@ for (const q of TEST_QUERIES) {
   // navigations into a state where /player never fires — which manifests as
   // "no /player XHR observed in time" for every test of the next song.
   // Closing and re-opening the page drops all of that.
+  try {
+    await page.close();
+  } catch {}
+  page = await ctx.newPage();
+  page.on('dialog', (d) => d.accept().catch(() => {}));
+  observer = attachPlayerObserver(page);
+}
+
+// Music-video black-screen guard. One OMV per query (best effort) — skip the
+// query if no clean video-surface upload surfaces rather than failing the suite.
+for (const q of TEST_QUERIES) {
+  console.log(`\n=== discovering music video for "${q}" ===`);
+  let mv;
+  try {
+    mv = await discoverMusicVideo(q);
+  } catch (err) {
+    console.log(`  ~ skip: discovery error (${err.message})`);
+    continue;
+  }
+  if (!mv) {
+    console.log(`  ~ skip: no clean OMV/UGC upload surfaced for "${q}"`);
+    continue;
+  }
+  console.log(`  video=${mv.clean.videoId}  type=${mv.clean.musicVideoType}  "${mv.title}" by ${mv.artist}`);
+  const results = await runTests([makeMusicVideoTest(mv)], page, observer);
+  allResults = allResults.concat(results);
   try {
     await page.close();
   } catch {}

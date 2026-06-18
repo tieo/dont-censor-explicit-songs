@@ -9,6 +9,9 @@ import {
   findExplicitSwap,
   buildSearchQuery,
   stripArtistPrefix,
+  surfaceClass,
+  pickExplicitSwap,
+  type TrackRow,
 } from '../src/ytmusic/index.ts';
 
 interface Case {
@@ -107,6 +110,67 @@ const failures: string[] = [];
     process.exit(1);
   }
   console.log(`✓ query-normalization helpers OK (${cases.length} cases)`);
+}
+
+// Offline regression tests for playback-surface compatibility. The black-
+// screen-on-music-video bug came from swapping a video-surface track (OMV/UGC)
+// to an audio-only explicit song (ATV): the audio stream has no video track so
+// the player renders a black frame. The matcher must refuse cross-class swaps.
+{
+  const ATV = 'MUSIC_VIDEO_TYPE_ATV';
+  const OMV = 'MUSIC_VIDEO_TYPE_OMV';
+  const UGC = 'MUSIC_VIDEO_TYPE_UGC';
+  let unitFails = 0;
+  const check = (cond: boolean, msg: string) => {
+    if (!cond) { console.log(`✗ ${msg}`); unitFails++; }
+  };
+
+  check(surfaceClass(ATV) === 'audio', 'ATV should classify as audio');
+  check(surfaceClass(OMV) === 'video', 'OMV should classify as video');
+  check(surfaceClass(UGC) === 'video', 'UGC should classify as video');
+  check(surfaceClass(undefined) === 'audio', 'unknown type should default to audio');
+
+  const row = (o: Partial<TrackRow>): TrackRow => ({
+    videoId: o.videoId ?? 'x', title: o.title ?? 'Song', artist: o.artist ?? 'Artist',
+    durationSec: o.durationSec ?? 180, explicit: o.explicit ?? false, musicVideoType: o.musicVideoType,
+  });
+
+  // 1. Audio source + explicit ATV candidate → swap (the normal song case).
+  {
+    const swap = pickExplicitSwap(
+      { title: 'Song', artist: 'Artist', durationSec: 180, videoId: 'clean', musicVideoType: ATV },
+      [row({ videoId: 'expA', explicit: true, musicVideoType: ATV })],
+    );
+    check(swap?.videoId === 'expA', 'audio source should swap to explicit ATV');
+  }
+
+  // 2. Video source (OMV) + ONLY explicit ATV available → NO swap (black-screen
+  //    guard: never feed audio-only into a video surface).
+  {
+    const swap = pickExplicitSwap(
+      { title: 'Song', artist: 'Artist', durationSec: 180, videoId: 'cleanVid', musicVideoType: OMV },
+      [row({ videoId: 'expA', explicit: true, musicVideoType: ATV })],
+    );
+    check(swap === null, 'video source must NOT swap to audio-only ATV (black-screen guard)');
+  }
+
+  // 3. Video source + explicit OMV available → swap to the video candidate.
+  {
+    const swap = pickExplicitSwap(
+      { title: 'Song', artist: 'Artist', durationSec: 180, videoId: 'cleanVid', musicVideoType: OMV },
+      [
+        row({ videoId: 'expA', explicit: true, musicVideoType: ATV }),
+        row({ videoId: 'expV', explicit: true, musicVideoType: OMV }),
+      ],
+    );
+    check(swap?.videoId === 'expV', 'video source should swap to a video-class explicit candidate');
+  }
+
+  if (unitFails) {
+    console.log(`✗ ${unitFails} surface-compatibility unit failures`);
+    process.exit(1);
+  }
+  console.log('✓ surface-compatibility helpers OK (7 cases)');
 }
 
 for (const c of cases) {

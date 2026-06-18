@@ -11,6 +11,24 @@ export interface MatchInput {
   durationSec?: number;
   /** Video ID of the currently playing track — excluded from candidates. */
   videoId?: string;
+  /**
+   * Source track's YT Music content type (MUSIC_VIDEO_TYPE_ATV / _OMV / _UGC).
+   * When set, swaps are restricted to a playback-compatible candidate so we
+   * never feed an audio-only stream into a video surface (black screen).
+   */
+  musicVideoType?: string;
+}
+
+/**
+ * Collapse YT Music's content types into a playback surface class. ATV is an
+ * audio-only song (static cover art); OMV/UGC carry actual video. A swap is
+ * only safe between the same class — swapping a video track to audio-only
+ * leaves the player rendering a black frame.
+ */
+export type SurfaceClass = 'audio' | 'video';
+export function surfaceClass(musicVideoType: string | undefined): SurfaceClass {
+  if (!musicVideoType) return 'audio'; // songs-filter results & unknowns are audio
+  return musicVideoType === 'MUSIC_VIDEO_TYPE_ATV' ? 'audio' : 'video';
 }
 
 export interface MatchOptions {
@@ -154,10 +172,15 @@ export function pickExplicitSwap(
   opts: MatchOptions = {}
 ): TrackRow | null {
   const tol = opts.durationToleranceSec ?? 10;
+  const wantClass = surfaceClass(input.musicVideoType);
 
   const filtered = candidates.filter((c) => {
     if (c.videoId === input.videoId) return false;
     if (!c.explicit) return false;
+    // Playback-compatibility gate: never swap a video-surface track to an
+    // audio-only candidate (or vice versa) — the mismatch is what causes the
+    // black-screen-on-music-video bug.
+    if (surfaceClass(c.musicVideoType) !== wantClass) return false;
     if (!titleMatches(c.title, input.title, c.artist, input.artist)) return false;
     if (!artistMatches(c.artist, input.artist)) return false;
     if (input.durationSec != null && c.durationSec != null) {
@@ -192,8 +215,17 @@ export async function findExplicitSwap(
   searchOpts: SearchOptions = {},
   matchOpts: MatchOptions = {},
 ): Promise<TrackRow | null> {
+  // Audio (ATV) sources match against the Songs shelf (default). Video sources
+  // need the unfiltered shelf so OMV/UGC candidates are present — the Songs
+  // filter strips them, which would leave a video source with no compatible
+  // candidate. Caller may still override songsOnly explicitly.
+  const effectiveOpts: SearchOptions =
+    searchOpts.songsOnly === undefined && surfaceClass(input.musicVideoType) === 'video'
+      ? { ...searchOpts, songsOnly: false }
+      : searchOpts;
+
   for (let attempt = 0; attempt < 2; attempt++) {
-    const json = await search(query, searchOpts);
+    const json = await search(query, effectiveOpts);
     const rows = parseSearchResponse(json);
     // Also let the caller signal "this is already explicit" — if the input's
     // own videoId came back tagged explicit, no swap is needed.
