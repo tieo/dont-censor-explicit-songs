@@ -173,6 +173,7 @@ export default defineContentScript({
     // MutationObserver and strip them for a bounded window, rather than betting
     // on a fixed delay being long enough.
     function forceAudioMode(): void {
+      log('forcing cover-art mode (audio-only swap target)');
       const strip = () => {
         for (const sel of ['ytmusic-player', 'ytmusic-player-page']) {
           for (const el of Array.from(document.querySelectorAll(sel))) {
@@ -181,13 +182,25 @@ export default defineContentScript({
         }
       };
       strip();
+      // Two complementary nets, both bounded to a 20s window (the SPA can set
+      // video-mode late on slow machines): a MutationObserver catches attribute
+      // toggles AND nodes inserted already carrying video-mode (childList), and
+      // an interval re-query is a fallback for anything the observer misses.
       const obs = new MutationObserver(strip);
       obs.observe(document.documentElement, {
         subtree: true,
         attributes: true,
         attributeFilter: ['video-mode'],
+        childList: true,
       });
-      setTimeout(() => obs.disconnect(), 15000);
+      let ticks = 0;
+      const iv = setInterval(() => {
+        strip();
+        if (++ticks >= 100) {
+          clearInterval(iv);
+          obs.disconnect();
+        }
+      }, 200);
     }
 
     function isNextCall(url: string): boolean {
