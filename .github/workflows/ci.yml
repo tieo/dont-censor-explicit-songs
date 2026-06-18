@@ -126,12 +126,24 @@ jobs:
         run: |
           pnpm zip
           pnpm zip:firefox
-          # Firefox/Zen treat .xpi as installable; .zip downloads as a file.
-          # Same bytes, different filename → user can install via drag-drop
-          # into about:addons.
-          cp ".output/dont-censor-explicit-songs-${VERSION}-firefox.zip" \
-             ".output/dont-censor-explicit-songs-${VERSION}-firefox.xpi"
           ls .output/dont-censor-explicit-songs-${VERSION}*
+      - name: Sign Firefox XPI (AMO unlisted)
+        if: steps.ver.outputs.exists == 'false'
+        env:
+          MOZ_API_KEY: ${{ secrets.MOZ_API_KEY }}
+          MOZ_API_SECRET: ${{ secrets.MOZ_API_SECRET }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          pnpm dlx web-ext sign \
+            --source-dir .output/firefox-mv3 \
+            --api-key "$MOZ_API_KEY" \
+            --api-secret "$MOZ_API_SECRET" \
+            --channel unlisted \
+            --artifacts-dir .output/signed
+          # web-ext produces a name like: dont_censor_explicit_songs-X.Y.Z-an+fx.xpi
+          SIGNED=$(ls .output/signed/*.xpi | head -1)
+          cp "$SIGNED" ".output/dont-censor-explicit-songs-${VERSION}-firefox.xpi"
+          echo "Signed XPI: $SIGNED"
       - name: Create tag + release
         if: steps.ver.outputs.exists == 'false'
         env:
@@ -143,8 +155,7 @@ jobs:
           git push origin "$TAG"
           gh release create "$TAG" \
             --title "$TAG" \
-            --notes "Built from ${GITHUB_SHA::7}. See README for install instructions — Firefox/Zen need temporary load via about:debugging (unsigned XPI)." \
+            --notes "Built from ${GITHUB_SHA::7}. Firefox/Zen: drag the .xpi into about:addons for permanent install (AMO-signed, no developer mode needed)." \
             .output/dont-censor-explicit-songs-${VERSION}-chrome.zip \
             .output/dont-censor-explicit-songs-${VERSION}-firefox.xpi \
-            .output/dont-censor-explicit-songs-${VERSION}-firefox.zip \
             .output/dont-censor-explicit-songs-${VERSION}-sources.zip
