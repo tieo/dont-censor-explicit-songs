@@ -797,6 +797,14 @@ function makeAudioSwapTest(mv) {
       })
       .catch(() => {});
     const hit = await observer.waitForXhrAfter(t);
+    if (hit.videoId == null) {
+      // No /player videoDetails — the source upload is age/region-gated in this
+      // (anonymous CI) profile and never produced a playable stream, so there's
+      // no swap to assert. Same gating guard as makeMusicVideoTest.
+      const err = new Error(`OMV ${mv.clean.videoId} returned no playable /player data (gated profile)`);
+      err.skip = true;
+      throw err;
+    }
     if (hit.videoId === mv.clean.videoId) {
       // The runtime /player metadata for this specific upload didn't yield a
       // swap (age/region gating, or it self-reported explicit). Nothing to
