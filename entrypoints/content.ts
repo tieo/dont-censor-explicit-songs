@@ -37,9 +37,12 @@ export default defineContentScript({
     const swapCache = new Map<string, string | null>();
     // videoId → in-flight resolution promise (de-dupe)
     const pending = new Map<string, Promise<string | null>>();
-    // Source videoIds whose swap drops video for audio (OMV/UGC → ATV). After
-    // their /player swap we nudge the SPA into cover-art mode.
-    const audioSwapForVideo = new Set<string>();
+    // Source videoId → the swap TARGET's playback surface class. When the target
+    // is audio-only we force the SPA into cover-art mode at /player time so an
+    // audio stream never renders behind a video surface (black frame). Recorded
+    // at resolve time because the /player swap sites only carry the target's
+    // videoId, not its content type.
+    const swapTargetClass = new Map<string, ReturnType<typeof surfaceClass>>();
 
     // Live prefs, fed by the ISOLATED-world bridge over window.postMessage
     // (MAIN world can't read chrome.storage directly). Defaults until the
@@ -143,16 +146,10 @@ export default defineContentScript({
           );
           const id = swap?.videoId ?? null;
           swapCache.set(meta.videoId, id);
-          // A video source swapped to an audio-only (ATV) candidate must drop
-          // the SPA into cover-art mode, else the player keeps the video
-          // surface and shows a black frame for the audio stream.
-          if (
-            swap &&
-            surfaceClass(meta.musicVideoType) === 'video' &&
-            surfaceClass(swap.musicVideoType) === 'audio'
-          ) {
-            audioSwapForVideo.add(meta.videoId);
-          }
+          // Record the target's surface class so the /player swap can force
+          // cover-art mode when it's audio-only (prevents a black frame behind
+          // an audio stream when a music video is swapped to ATV).
+          if (swap) swapTargetClass.set(meta.videoId, surfaceClass(swap.musicVideoType));
           if (id) log(`prepared swap "${meta.title}" by ${meta.artist}: ${meta.videoId} → ${id}`);
           else log(`no explicit found for "${meta.title}" by ${meta.artist} (${meta.videoId})`);
           return id;
@@ -349,7 +346,7 @@ export default defineContentScript({
           parsed.videoId = swap;
           const newBody = JSON.stringify(parsed);
           log(`/player swap (cache): ${videoId} → ${swap}`);
-          if (audioSwapForVideo.has(videoId)) forceAudioMode();
+          if (swapTargetClass.get(videoId) === 'audio') forceAudioMode();
           return ORIG_XHR_SEND.call(this, newBody);
         }
         log(`/player no swap (cache): ${videoId}`);
@@ -374,7 +371,7 @@ export default defineContentScript({
         if (xhrSent) return;
         xhrSent = true;
         parsed.videoId = swap;
-        if (audioSwapForVideo.has(videoId)) forceAudioMode();
+        if (swapTargetClass.get(videoId) === 'audio') forceAudioMode();
         ORIG_XHR_SEND.call(this, JSON.stringify(parsed));
       };
       const budgetTimer = setTimeout(() => {
